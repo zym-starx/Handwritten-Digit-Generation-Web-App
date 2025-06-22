@@ -4,7 +4,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
-from PIL import Image
 import io
 import base64
 
@@ -58,165 +57,103 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Model Definition - Updated to handle different architectures
-class SimpleConditionalVAE(nn.Module):
-    def __init__(self, input_dim=784, hidden_dim=256, latent_dim=16, num_classes=10):
-        super(SimpleConditionalVAE, self).__init__()
-        
-        self.num_classes = num_classes
-        self.latent_dim = latent_dim
-        
-        # Encoder
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim + num_classes, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.BatchNorm1d(hidden_dim // 2),
-            nn.ReLU(),
-        )
-        
-        self.fc_mu = nn.Linear(hidden_dim // 2, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim // 2, latent_dim)
-        
-        # Decoder
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim + num_classes, hidden_dim // 2),
-            nn.BatchNorm1d(hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim // 2, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, input_dim),
-            nn.Sigmoid()
-        )
-    
-    def decode(self, z, y):
-        y_onehot = F.one_hot(y, self.num_classes).float()
-        input_with_label = torch.cat([z, y_onehot], dim=1)
-        return self.decoder(input_with_label)
-    
-    def generate(self, digit, num_samples=5):
-        self.eval()
-        with torch.no_grad():
-            device = next(self.parameters()).device
-            y = torch.tensor([digit] * num_samples).to(device)
-            z = torch.randn(num_samples, self.latent_dim).to(device)
-            samples = self.decode(z, y)
-            return samples.view(-1, 28, 28)
+# Your exact model architecture
+class ConditionalVAE(nn.Module):
+    def __init__(self, latent_dim=20, num_classes=10):
+        super(ConditionalVAE, self).__init__()
 
-# Alternative model architecture (in case the saved model is different)
-class AlternativeVAE(nn.Module):
-    def __init__(self, input_dim=784, hidden_dim=400, latent_dim=20, num_classes=10):
-        super(AlternativeVAE, self).__init__()
-        
-        self.num_classes = num_classes
         self.latent_dim = latent_dim
-        
+        self.num_classes = num_classes
+        self.input_dim = 28 * 28
+
         # Encoder
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim + num_classes, hidden_dim),
+            nn.Linear(self.input_dim + self.num_classes, 400),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU()
+            nn.Linear(400, latent_dim * 2),
         )
-        
-        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-        
         # Decoder
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim + num_classes, hidden_dim),
+            nn.Linear(latent_dim + self.num_classes, 400),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, input_dim),
+            nn.Linear(400, self.input_dim),
             nn.Sigmoid()
         )
-    
-    def decode(self, z, y):
-        y_onehot = F.one_hot(y, self.num_classes).float()
-        input_with_label = torch.cat([z, y_onehot], dim=1)
-        return self.decoder(input_with_label)
+
+    def encode(self, x, labels):
+        """Input: x (batch, 784), labels (batch, 10)"""
+        x = torch.cat([x, labels], dim=-1)
+        stats = self.encoder(x)
+        mu, logvar = stats.chunk(2, dim=-1)
+        return mu, logvar
+
+    def reparameterize(self, mu, logvar):
+        """Reparam Trick"""
+        sigma = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(sigma)
+        return mu + eps * sigma
+
+    def decode(self, z, labels):
+        """Decode latent variable + label"""
+        z = torch.cat([z, labels], dim=-1)
+        return self.decoder(z)
+
+    def forward(self, x, labels):
+        """Complete forward pass"""
+        mu, logvar = self.encode(x, labels)
+        z = self.reparameterize(mu, logvar)
+        recon_x = self.decode(z, labels)
+        return recon_x, mu, logvar
     
     def generate(self, digit, num_samples=5):
+        """Generate samples for a specific digit"""
         self.eval()
         with torch.no_grad():
             device = next(self.parameters()).device
-            y = torch.tensor([digit] * num_samples).to(device)
+            
+            # Create one-hot encoded labels for the digit
+            labels = torch.zeros(num_samples, self.num_classes).to(device)
+            labels[:, digit] = 1.0
+            
+            # Sample from latent space
             z = torch.randn(num_samples, self.latent_dim).to(device)
-            samples = self.decode(z, y)
+            
+            # Decode to get images
+            samples = self.decode(z, labels)
+            
+            # Reshape to 28x28 images
             return samples.view(-1, 28, 28)
 
 @st.cache_resource
 def load_model():
-    """Load the trained model with multiple fallback strategies"""
+    """Load the trained model"""
     model_files = [
+        'cvae_model.pth',
         'mnist_digit_generator.pth',
-        'final_digit_generator_model.pth',
-        'model.pth',
-        'checkpoint.pth'
+        'model.pth'
     ]
     
     for model_file in model_files:
         try:
-            # Try to load the checkpoint
-            checkpoint = torch.load(model_file, map_location='cpu')
+            # Initialize model with correct parameters
+            model = ConditionalVAE(latent_dim=20, num_classes=10)
             
-            # Strategy 1: Checkpoint format with model_state_dict
-            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                # Try different model architectures
-                for ModelClass, params in [
-                    (SimpleConditionalVAE, {'hidden_dim': 256, 'latent_dim': 16}),
-                    (SimpleConditionalVAE, {'hidden_dim': 400, 'latent_dim': 20}),
-                    (AlternativeVAE, {'hidden_dim': 400, 'latent_dim': 20}),
-                    (AlternativeVAE, {'hidden_dim': 256, 'latent_dim': 16})
-                ]:
-                    try:
-                        model = ModelClass(**params)
-                        model.load_state_dict(checkpoint['model_state_dict'])
-                        st.success(f"✅ Model loaded from {model_file} (checkpoint format)")
-                        return model, True, "ML"
-                    except:
-                        continue
+            # Load the state dict
+            state_dict = torch.load(model_file, map_location='cpu')
+            model.load_state_dict(state_dict)
             
-            # Strategy 2: Direct state dict
-            elif isinstance(checkpoint, dict):
-                for ModelClass, params in [
-                    (SimpleConditionalVAE, {'hidden_dim': 256, 'latent_dim': 16}),
-                    (SimpleConditionalVAE, {'hidden_dim': 400, 'latent_dim': 20}),
-                    (AlternativeVAE, {'hidden_dim': 400, 'latent_dim': 20}),
-                    (AlternativeVAE, {'hidden_dim': 256, 'latent_dim': 16})
-                ]:
-                    try:
-                        model = ModelClass(**params)
-                        model.load_state_dict(checkpoint)
-                        st.success(f"✅ Model loaded from {model_file} (state dict format)")
-                        return model, True, "ML"
-                    except:
-                        continue
+            st.success(f"✅ Model loaded successfully from {model_file}!")
+            return model, True
             
-            # Strategy 3: Entire model object
-            else:
-                try:
-                    model = checkpoint
-                    if hasattr(model, 'generate'):
-                        st.success(f"✅ Model loaded from {model_file} (full model format)")
-                        return model, True, "ML"
-                except:
-                    continue
-                    
         except FileNotFoundError:
             continue
         except Exception as e:
             st.warning(f"⚠️ Error loading {model_file}: {str(e)}")
             continue
     
-    # If all model loading fails, show info and use demo mode
-    st.info("ℹ️ No compatible model found. Using demo mode with pattern generation.")
-    return None, False, "Demo"
+    # If no model found
+    st.info("ℹ️ No trained model found. Using demo mode with pattern generation.")
+    return None, False
 
 def generate_demo_digit(digit, variation=0):
     """Generate demo digit when model isn't available"""
@@ -308,20 +245,22 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>✍️ Handwritten Digit Image Generator</h1>
-        <p>Generate synthetic MNIST-like images using your trained model</p>
+        <p>Generate synthetic MNIST-like images using your trained Conditional VAE</p>
     </div>
     """, unsafe_allow_html=True)
     
     # Load model
-    model, model_loaded, mode = load_model()
+    model, model_loaded = load_model()
     
     # Display mode
-    if mode == "ML":
-        st.markdown('<div class="mode-indicator ml-mode">🧠 ML Mode: Using Trained Neural Network</div>', 
+    if model_loaded:
+        st.markdown('<div class="mode-indicator ml-mode">🧠 ML Mode: Using Your Trained Conditional VAE</div>', 
                    unsafe_allow_html=True)
+        mode = "ML"
     else:
         st.markdown('<div class="mode-indicator demo-mode">🎨 Demo Mode: Pattern Generation</div>', 
                    unsafe_allow_html=True)
+        mode = "Demo"
     
     # User input
     st.subheader("🎯 Generate Digits")
@@ -343,10 +282,10 @@ def main():
         with st.spinner("🔄 Generating images..."):
             if model_loaded and model:
                 try:
-                    # Use ML model
+                    # Use your trained model
                     images = model.generate(selected_digit, num_samples=5)
-                    images = [img.numpy() for img in images]
-                    generation_method = "Neural Network"
+                    images = [img.cpu().numpy() for img in images]
+                    generation_method = "Conditional VAE (Your Trained Model)"
                 except Exception as e:
                     st.warning(f"ML generation failed: {e}. Using demo mode.")
                     images = [generate_demo_digit(selected_digit, i) for i in range(5)]
@@ -376,7 +315,36 @@ def main():
                     unsafe_allow_html=True
                 )
     
-    # Debug info
+    # Model Information
+    st.markdown("---")
+    
+    with st.expander("📊 Model Architecture"):
+        if model_loaded:
+            st.write("""
+            **Your Conditional VAE Architecture:**
+            - **Type:** Conditional Variational Autoencoder
+            - **Latent Dimension:** 20
+            - **Input Dimension:** 784 (28×28 pixels)
+            - **Hidden Layer:** 400 units
+            - **Conditioning:** One-hot encoded digit labels (10 classes)
+            
+            **Encoder:** Input + Label → 400 units → Latent space (μ, σ)
+            **Decoder:** Latent + Label → 400 units → 784 pixels
+            
+            **Training Details:**
+            - Framework: PyTorch
+            - Dataset: MNIST
+            - Loss: Reconstruction + KL Divergence
+            - Optimizer: Adam (lr=1e-3)
+            """)
+        else:
+            st.write("""
+            **Demo Mode Information:**
+            - Using mathematical pattern generation
+            - Simulates handwritten digit appearance
+            - Upload your trained model for ML-based generation
+            """)
+    
     with st.expander("🔧 Debug Information"):
         st.write("**Available files in repository:**")
         import os
@@ -391,8 +359,11 @@ def main():
         
         if model:
             st.write(f"**Model type:** {type(model).__name__}")
+            st.write(f"**Latent dimension:** {model.latent_dim}")
+            st.write(f"**Number of classes:** {model.num_classes}")
             try:
-                st.write(f"**Model parameters:** {sum(p.numel() for p in model.parameters()):,}")
+                total_params = sum(p.numel() for p in model.parameters())
+                st.write(f"**Total parameters:** {total_params:,}")
             except:
                 st.write("Could not count parameters")
 
